@@ -1,115 +1,125 @@
 import streamlit as st
 import pandas as pd
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 import os
 
-# --- CẤU HÌNH TÊN FILE ---
-# 1. Tên file Excel đầu vào (Bạn nhớ để file này cùng thư mục với code)
-INPUT_EXCEL_FILE = 'file_gan_nhan.xlsx' 
+# --- CẤU HÌNH ---
+INPUT_EXCEL_FILE = 'file_gan_nhan.xlsx' # File gốc chứa dữ liệu
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1VDro6njhY0p5QfAYlrf5_yu5ngMdHU3X8_rbgSVqepM/edit?hl=vi&gid=0#gid=0DÁN_LINK_GOOGLE_SHEET_CỦA_BẠN_VÀO_ĐÂY" # Ví dụ: https://docs.google.com/spreadsheets/d/xxxx...
 
-# 2. Tên file Excel kết quả đầu ra
-OUTPUT_EXCEL_FILE = 'ket_qua_gan_nhan.xlsx'
-
-# --- HÀM XỬ LÝ DỮ LIỆU ---
-def load_data():
-    """Đọc file Excel (.xlsx) an toàn"""
-    if os.path.exists(INPUT_EXCEL_FILE):
-        try:
-            # SỬA LỖI Ở ĐÂY: Dùng read_excel, KHÔNG dùng read_csv
-            df = pd.read_excel(INPUT_EXCEL_FILE, engine='openpyxl') 
-            return df
-        except Exception as e:
-            st.error(f"Lỗi khi đọc file Excel: {e}")
-            st.info("Gợi ý: Hãy chạy lệnh 'pip install openpyxl' nếu bạn chưa cài.")
-            return None
-    else:
-        st.error(f"⚠️ Không tìm thấy file: '{INPUT_EXCEL_FILE}'")
-        return None
-
-def save_to_excel(text_id, text_content, label, note):
-    """Lưu kết quả vào file Excel output"""
+# --- KẾT NỐI GOOGLE SHEETS ---
+def get_gsheet_client():
+    # Lấy thông tin từ secrets
+    creds_dict = dict(st.secrets["gsheets"])
     
-    # Tạo một dòng dữ liệu mới
-    new_data = pd.DataFrame([{
-        'id': text_id,
-        'text': text_content,
-        'label': label,
-        'note': note
-    }])
+    # Định nghĩa scope (quyền)
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    
+    # Tạo credentials
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    return client
 
+def load_done_data_from_sheet():
+    """Đọc dữ liệu đã làm từ Google Sheet về để lọc"""
     try:
-        if os.path.exists(OUTPUT_EXCEL_FILE):
-            # Nếu file kết quả đã có, đọc lên và nối thêm dòng mới
-            existing_df = pd.read_excel(OUTPUT_EXCEL_FILE, engine='openpyxl')
-            updated_df = pd.concat([existing_df, new_data], ignore_index=True)
-        else:
-            # Nếu chưa có, dòng mới chính là khởi đầu
-            updated_df = new_data
-        
-        # Lưu đè lại vào file Excel
-        updated_df.to_excel(OUTPUT_EXCEL_FILE, index=False, engine='openpyxl')
-        
+        client = get_gsheet_client()
+        sheet = client.open_by_url(SHEET_URL).sheet1
+        # Lấy toàn bộ records
+        data = sheet.get_all_records() 
+        return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Lỗi khi lưu file: {e}")
-        # Gợi ý tắt file excel nếu đang mở
-        st.warning("⚠️ Hãy đóng file Excel kết quả nếu bạn đang mở nó!")
+        return pd.DataFrame() # Trả về rỗng nếu chưa có gì hoặc lỗi
+
+def save_to_gsheet(text_id, text_content, label, note):
+    """Ghi trực tiếp 1 dòng lên Google Sheet"""
+    try:
+        client = get_gsheet_client()
+        sheet = client.open_by_url(SHEET_URL).sheet1
+        # Thêm dòng mới vào cuối bảng
+        sheet.append_row([text_id, text_content, label, note])
+        return True
+    except Exception as e:
+        st.error(f"Lỗi khi lưu lên Google Sheet: {e}")
+        return False
+
+# --- HÀM XỬ LÝ LOGIC (QUAN TRỌNG) ---
+def get_remaining_data(df_input, df_done):
+    """
+    Lấy Input trừ đi Output (dựa vào ID)
+    để ra danh sách các câu chưa làm.
+    """
+    if df_done.empty or 'id' not in df_done.columns:
+        return df_input
+    
+    # Lấy danh sách ID đã làm
+    done_ids = df_done['id'].unique()
+    
+    # Lọc: Chỉ giữ lại những dòng trong Input mà ID KHÔNG nằm trong done_ids
+    # Dấu ~ nghĩa là phủ định (NOT)
+    df_remaining = df_input[~df_input['id'].isin(done_ids)]
+    
+    return df_remaining
 
 # --- GIAO DIỆN CHÍNH ---
-st.set_page_config(page_title="Tool Gán Nhãn Excel", layout="centered")
-st.title("📊 Tool Gán Nhãn (Excel Version)")
+st.set_page_config(page_title="Tool Gán Nhãn Dữ Liệu 'Niềm tin bản thân' Online", layout="centered")
+st.title("☁️ Tool Gán Nhãn Dữ Liệu 'Niềm tin bản thân' Online")
 
-# 1. Quản lý trạng thái (Index câu hiện tại)
-if 'index' not in st.session_state:
-    st.session_state.index = 0
+# 1. Load Input (File Excel gốc)
+if os.path.exists(INPUT_EXCEL_FILE):
+    try:
+        df_input = pd.read_excel(INPUT_EXCEL_FILE, engine='openpyxl')
+        # Đảm bảo cột ID là string hoặc int thống nhất để so sánh
+        df_input['id'] = df_input['id'].astype(str) 
+    except Exception as e:
+        st.error(f"Lỗi đọc file Input: {e}")
+        st.stop()
+else:
+    st.error("Không tìm thấy file Excel đầu vào!")
+    st.stop()
 
-# 2. Load dữ liệu
-df = load_data()
+# 2. Load Output (Dữ liệu đã làm trên Sheet)
+df_done = load_done_data_from_sheet()
+if not df_done.empty:
+    df_done['id'] = df_done['id'].astype(str)
 
-# 3. Logic hiển thị
-if df is not None and not df.empty:
-    total = len(df)
-    current = st.session_state.index
+# 3. Tính toán dữ liệu còn lại
+df_remaining = get_remaining_data(df_input, df_done)
 
-    # Kiểm tra xem còn dữ liệu để gán không
-    if current < total:
-        row = df.iloc[current]
+# Thống kê tiến độ
+total = len(df_input)
+done_count = len(df_done) if not df_done.empty else 0
+st.progress(done_count / total)
+st.caption(f"Tiến độ: Đã làm {done_count} / {total} câu. (Còn lại {len(df_remaining)} câu)")
 
-        # Thanh tiến trình
-        st.progress(current / total)
-        st.caption(f"Câu số: {current + 1} / {total}")
+# 4. Hiển thị Form gán nhãn
+if not df_remaining.empty:
+    # Lấy dòng đầu tiên của danh sách CÒN LẠI (Luôn là dòng đầu vì danh sách tự co ngắn lại)
+    row = df_remaining.iloc[0]
 
-        # Hiển thị nội dung
-        st.info(f"📝 **Nội dung:**\n\n{row['text']}")
+    st.info(f"📝 **Nội dung (ID: {row['id']}):**\n\n{row['text']}")
 
-        # Form gán nhãn
-        with st.form("labeling_form"):
-            label = st.radio(
-                "Chọn nhãn:",
-                ["Tích cực", "Tiêu cực", "Trung lập"],
-                index=None
-            )
-            note = st.text_input("Ghi chú:")
-            
-            submitted = st.form_submit_button("Lưu & Tiếp theo ➡️")
+    with st.form("labeling_form"):
+        label = st.radio(
+            "Chọn nhãn:",
+            ["Niềm tin bản thân rõ ràng", "Niềm tin bản thân ngầm định", "Không phải niềm tin bản thân"],
+            index=None
+        )
+        note = st.text_input("Ghi chú:")
+        
+        submitted = st.form_submit_button("Lưu & Tiếp theo ➡️")
 
-            if submitted:
-                if label:
-                    # Lưu dữ liệu
-                    save_to_excel(row['id'], row['text'], label, note)
-                    # Tăng index
-                    st.session_state.index += 1
-                    st.rerun()
-                else:
-                    st.warning("Vui lòng chọn một nhãn!")
-    else:
-        # Khi hoàn thành
-        st.success("🎉 Đã gán nhãn xong toàn bộ dữ liệu!")
-        st.balloons()
+        if submitted:
+            if label:
+                # Ghi lên Sheet
+                success = save_to_gsheet(row['id'], row['text'], label, note)
+                if success:
+                    st.success("Đã lưu thành công!")
+                    st.rerun() # Load lại trang -> Tự động tính lại df_remaining -> Hiện câu mới
+            else:
+                st.warning("Vui lòng chọn nhãn!")
 
-        # Nút tải file
-        if os.path.exists(OUTPUT_EXCEL_FILE):
-            with open(OUTPUT_EXCEL_FILE, "rb") as f:
-                st.download_button(
-                    "📥 Tải file kết quả (.xlsx)",
-                    f,
-                    file_name="ket_qua_final.xlsx"
-                )
+else:
+    st.success("🎉 TUYỆT VỜI! Đã gán nhãn xong toàn bộ dữ liệu!")
+    st.balloons()
